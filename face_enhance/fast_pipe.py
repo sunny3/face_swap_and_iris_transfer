@@ -524,66 +524,67 @@ def process(jpg_bytes, bot, stats):
     return res, nf
 
 
-imgs = sorted(glob.glob(f'{IN}/*.jpg'))
-if IRIS_ON:   # per-bot avatar landmark cache (prod: computed once per bot)
-    lm(np.zeros((256, 256, 3), np.uint8))
-    for p in imgs:
-        bot = os.path.splitext(os.path.basename(p))[0]
-        av = cv2.imread(f'{AV}/{bot}.jpg')
-        pa = None if av is None else lm(av)
-        if pa is None:
-            AVC[bot] = None; continue
-        ea = {k: eye(pa, k) for k in "lr"}
-        for k in "lr":
-            ea[k]["mask"] = vis_mask(ea[k], (0, 0, av.shape[1], av.shape[0]))
-        AVC[bot] = (av, ea)
+if __name__ == '__main__':   # bench run; service/app.py imports the models + process()/run() only
+    imgs = sorted(glob.glob(f'{IN}/*.jpg'))
+    if IRIS_ON:   # per-bot avatar landmark cache (prod: computed once per bot)
+        lm(np.zeros((256, 256, 3), np.uint8))
+        for p in imgs:
+            bot = os.path.splitext(os.path.basename(p))[0]
+            av = cv2.imread(f'{AV}/{bot}.jpg')
+            pa = None if av is None else lm(av)
+            if pa is None:
+                AVC[bot] = None; continue
+            ea = {k: eye(pa, k) for k in "lr"}
+            for k in "lr":
+                ea[k]["mask"] = vis_mask(ea[k], (0, 0, av.shape[1], av.shape[0]))
+            AVC[bot] = (av, ea)
 
-data = {os.path.splitext(os.path.basename(p))[0]: open(p, 'rb').read() for p in imgs}
-# warmup (excluded): every image once (kernels / allocator for each face size), then reset
-for b, d in data.items():
-    process(d, b, {})
-torch.cuda.synchronize()
-ST.clear(); torch.cuda.reset_peak_memory_stats()
-per, fails, stats, results = {}, [], {}, {}
-REP = int(os.environ.get('REP', '3'))
-for rep in range(REP):
-    for bot, d in data.items():
-        torch.cuda.synchronize(); ts = time.perf_counter()
-        res, nf = process(d, bot, stats if rep == 0 else {})
-        ms = (time.perf_counter() - ts) * 1000
-        per.setdefault(bot, []).append(ms)
-        if rep == 0:
-            results[bot] = res
-            if nf == 0:
-                fails.append(f'{bot}:noface')
-os.makedirs(f'{OUT}/{VARIANT}', exist_ok=True)
-if SAVE:
-    for bot, res in results.items():
-        cv2.imwrite(f'{OUT}/{VARIANT}/{bot}.png', res)
-allv = np.concatenate([np.array(v) for v in per.values()])
-perm = {b: round(float(np.median(v)), 1) for b, v in per.items()}
-rec = {'method': VARIANT,
-       'per_image_ms': perm, 'p50_ms': round(float(np.percentile(allv, 50)), 1),
-       'p95_ms': round(float(np.percentile(allv, 95)), 1), 'cold_load_s': round(cold_load_s, 2),
-       'gpu': '3090 GPU3', 'vram_peak_mb': None,
-       'torch_peak_alloc_mb': round(torch.cuda.max_memory_allocated() / 2**20),
-       'torch_peak_reserved_mb': round(torch.cuda.max_memory_reserved() / 2**20),
-       'stage_ms_p50': {k: round(float(np.median(x)), 1) for k, x in ST.items()},
-       'output_hw': list(next(iter(results.values())).shape[:2]), 'failures': fails,
-       'opts': {'cuda_graphs': GRAPH, 'cf_fp16': CF_HALF, 'parse_fp16': PARSE_HALF, 'face_x2_at_footprint': FACEFP, 'det_fp16': DET_HALF, 'channels_last': CL, 'cudnn_benchmark': torch.backends.cudnn.benchmark,
-                'reps': REP},
-       'notes': ('warm single process; latency = jpeg bytes decode -> final BGR uint8 in host memory (no disk write); '
-                 f'{REP} passes over 26 imgs after a full warm pass, p50/p95 over all {len(allv)} runs, per_image_ms = per-bot median. '
-                 'RetinaFace r50 (resize 640) once; CodeFormer w1.0 ' + ('fp16 autocast' if CF_HALF else 'fp32') +
-                 '; RealESRGAN_x2plus fp16 untiled on the 512 restored face' +
-                 ('; bg = GPU bicubic x2' if BG_BICUBIC else ' and on the full frame (bg)') +
-                 '; GPU ROI paste (grid_sample inverse affine, erosion, Gaussian, ParseNet mask = helper constants); '
-                 'SkinDiffDetail-Lite fp16 on bbox+40% with feathered ellipse' +
-                 ('; avatar iris transfer (iris_variants avatar rules) with MediaPipe on the 2x face crop only, avatar '
-                  'landmarks cached per bot' if IRIS_ON else ''))}
-if IRIS_ON:
-    rec['eyes_replaced'] = {b: s.get('n', 0) for b, s in stats.items()}
-    rec['iris_stats'] = {b: {k: v for k, v in s.items()} for b, s in stats.items()}
-json.dump(rec, open(f'{LAT}/{VARIANT}.json', 'w'), indent=1, default=float)
-print('DONE', VARIANT, 'p50', rec['p50_ms'], 'p95', rec['p95_ms'], rec['stage_ms_p50'], 'fails', fails,
-      'eyes', sum(rec.get('eyes_replaced', {}).values()) if IRIS_ON else '-')
+    data = {os.path.splitext(os.path.basename(p))[0]: open(p, 'rb').read() for p in imgs}
+    # warmup (excluded): every image once (kernels / allocator for each face size), then reset
+    for b, d in data.items():
+        process(d, b, {})
+    torch.cuda.synchronize()
+    ST.clear(); torch.cuda.reset_peak_memory_stats()
+    per, fails, stats, results = {}, [], {}, {}
+    REP = int(os.environ.get('REP', '3'))
+    for rep in range(REP):
+        for bot, d in data.items():
+            torch.cuda.synchronize(); ts = time.perf_counter()
+            res, nf = process(d, bot, stats if rep == 0 else {})
+            ms = (time.perf_counter() - ts) * 1000
+            per.setdefault(bot, []).append(ms)
+            if rep == 0:
+                results[bot] = res
+                if nf == 0:
+                    fails.append(f'{bot}:noface')
+    os.makedirs(f'{OUT}/{VARIANT}', exist_ok=True)
+    if SAVE:
+        for bot, res in results.items():
+            cv2.imwrite(f'{OUT}/{VARIANT}/{bot}.png', res)
+    allv = np.concatenate([np.array(v) for v in per.values()])
+    perm = {b: round(float(np.median(v)), 1) for b, v in per.items()}
+    rec = {'method': VARIANT,
+           'per_image_ms': perm, 'p50_ms': round(float(np.percentile(allv, 50)), 1),
+           'p95_ms': round(float(np.percentile(allv, 95)), 1), 'cold_load_s': round(cold_load_s, 2),
+           'gpu': '3090 GPU3', 'vram_peak_mb': None,
+           'torch_peak_alloc_mb': round(torch.cuda.max_memory_allocated() / 2**20),
+           'torch_peak_reserved_mb': round(torch.cuda.max_memory_reserved() / 2**20),
+           'stage_ms_p50': {k: round(float(np.median(x)), 1) for k, x in ST.items()},
+           'output_hw': list(next(iter(results.values())).shape[:2]), 'failures': fails,
+           'opts': {'cuda_graphs': GRAPH, 'cf_fp16': CF_HALF, 'parse_fp16': PARSE_HALF, 'face_x2_at_footprint': FACEFP, 'det_fp16': DET_HALF, 'channels_last': CL, 'cudnn_benchmark': torch.backends.cudnn.benchmark,
+                    'reps': REP},
+           'notes': ('warm single process; latency = jpeg bytes decode -> final BGR uint8 in host memory (no disk write); '
+                     f'{REP} passes over 26 imgs after a full warm pass, p50/p95 over all {len(allv)} runs, per_image_ms = per-bot median. '
+                     'RetinaFace r50 (resize 640) once; CodeFormer w1.0 ' + ('fp16 autocast' if CF_HALF else 'fp32') +
+                     '; RealESRGAN_x2plus fp16 untiled on the 512 restored face' +
+                     ('; bg = GPU bicubic x2' if BG_BICUBIC else ' and on the full frame (bg)') +
+                     '; GPU ROI paste (grid_sample inverse affine, erosion, Gaussian, ParseNet mask = helper constants); '
+                     'SkinDiffDetail-Lite fp16 on bbox+40% with feathered ellipse' +
+                     ('; avatar iris transfer (iris_variants avatar rules) with MediaPipe on the 2x face crop only, avatar '
+                      'landmarks cached per bot' if IRIS_ON else ''))}
+    if IRIS_ON:
+        rec['eyes_replaced'] = {b: s.get('n', 0) for b, s in stats.items()}
+        rec['iris_stats'] = {b: {k: v for k, v in s.items()} for b, s in stats.items()}
+    json.dump(rec, open(f'{LAT}/{VARIANT}.json', 'w'), indent=1, default=float)
+    print('DONE', VARIANT, 'p50', rec['p50_ms'], 'p95', rec['p95_ms'], rec['stage_ms_p50'], 'fails', fails,
+          'eyes', sum(rec.get('eyes_replaced', {}).values()) if IRIS_ON else '-')

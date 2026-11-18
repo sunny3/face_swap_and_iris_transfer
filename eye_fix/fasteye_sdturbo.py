@@ -133,51 +133,52 @@ def run(img, seed):
     return out, full_m, used, st
 
 
-paths = sorted(glob.glob(f'{BASE}/*.png'))
-os.makedirs(OUT, exist_ok=True)
-run(cv2.imread(paths[0]), 0); run(cv2.imread(paths[1]), 0)  # warmup
-torch.cuda.reset_peak_memory_stats()
-per, stages, diffs, used_m = {}, [], {}, {}
-for pth in paths:
-    bot = os.path.splitext(os.path.basename(pth))[0]
-    img = cv2.imread(pth, cv2.IMREAD_COLOR)
-    torch.cuda.synchronize(); ts = time.perf_counter()
-    out, fm, used, st = run(img, a.seed)
-    per[bot] = round((time.perf_counter() - ts) * 1000, 1)
-    stages.append(st); used_m[bot] = used
-    cv2.imwrite(f'{OUT}/{bot}.png', out)
-    d = np.abs(out.astype(np.int16) - img.astype(np.int16)).mean(2)
-    rec = {'in_mask': None, 'outside': round(float(d.mean()), 4), 'changed_px_outside': 0}
-    if fm is not None:
-        rec = {'in_mask': round(float(d[fm > 127].mean()), 3), 'in_mask_any': round(float(d[fm > 0].mean()), 3),
-               'outside': round(float(d[fm == 0].mean()), 4), 'changed_px_outside': int((d[fm == 0] > 0).sum())}
-        ref = f'/b/eyemask2x/{bot}.png'
-        if os.path.exists(ref):
-            r = cv2.imread(ref, 0) > 127; u = fm > 127
-            rec['iou_vs_eyemask2x'] = round(float((r & u).sum() / max(1, (r | u).sum())), 3)
-    diffs[bot] = rec
-    print(bot, per[bot], 'ms', used, {k: round(v * 1000, 1) for k, v in st.items()}, rec, flush=True)
-v = np.array(list(per.values()))
-sk = ['det', 'mask', 'crop', 'diff', 'paste']
-ok = [d for d in diffs.values() if d['in_mask'] is not None]
-res = {'method': f'sd-turbo img2img fp16 {a.res}px eye-band crop, strength {a.strength}, {a.steps} step(s) '
-                 f'(num_inference_steps={n_inf}), guidance 0, mask={a.mask}, prompt: {PROMPT}',
-       'per_image_ms': per, 'p50_ms': round(float(np.percentile(v, 50)), 1), 'p95_ms': round(float(np.percentile(v, 95)), 1),
-       'cold_load_s': round(cold, 2), 'gpu': '3090 GPU3', 'vram_peak_mb': round(torch.cuda.max_memory_allocated() / 2**20),
-       'stage_ms_p50': {k: round(float(np.median([s[k] for s in stages if k in s])) * 1000, 1) for k in sk},
-       'stage_ms_p95': {k: round(float(np.percentile([s[k] for s in stages if k in s], 95)) * 1000, 1) for k in sk},
-       'mask_used': used_m,
-       'pixel_diff': {'mean_in_mask': round(float(np.mean([d['in_mask'] for d in ok])), 3),
-                      'mean_outside': round(float(np.mean([d['outside'] for d in ok])), 4),
-                      'changed_px_outside_total': int(sum(d['changed_px_outside'] for d in ok)),
-                      'mean_iou_vs_eyemask2x': round(float(np.mean([d['iou_vs_eyemask2x'] for d in ok if 'iou_vs_eyemask2x' in d])), 3),
-                      'per_image': diffs},
-       'notes': 'warm end-to-end per image = RetinaFace det (640px, GPU) + eyelid mask + crop/resize + diffusion (VAE enc + UNet + VAE dec) + '
-                'paste; image read/write excluded. mask=mp: MediaPipe FaceLandmarker (CPU, XNNPACK) on a 256px face crop, lids polygon x1.3, '
-                'Gaussian sigma 3 (same recipe as eyemask2x); falls back to kps ellipse if MediaPipe misses. mask=kps: two ellipses '
-                '(0.30 x 0.13 IOD) at RetinaFace eye kps. Prompt embeds cached at load (text encoder freed). VAE = SD2.1 VAE '
-                '(osd_models/sd21/vae). in_mask = mean |out-base| (0-255) where mask>127; outside = where mask==0. GPU 3 shared.'}
-print(json.dumps({k: res[k] for k in ('p50_ms', 'p95_ms', 'cold_load_s', 'vram_peak_mb', 'stage_ms_p50')}),
-      json.dumps({k: v for k, v in res['pixel_diff'].items() if k != 'per_image'}))
-os.makedirs('/b/lat', exist_ok=True)
-json.dump(res, open(f'/b/lat/{a.variant}.json', 'w'), indent=1)
+if __name__ == '__main__':   # bench run; service/app.py imports the models + process()/run() only
+    paths = sorted(glob.glob(f'{BASE}/*.png'))
+    os.makedirs(OUT, exist_ok=True)
+    run(cv2.imread(paths[0]), 0); run(cv2.imread(paths[1]), 0)  # warmup
+    torch.cuda.reset_peak_memory_stats()
+    per, stages, diffs, used_m = {}, [], {}, {}
+    for pth in paths:
+        bot = os.path.splitext(os.path.basename(pth))[0]
+        img = cv2.imread(pth, cv2.IMREAD_COLOR)
+        torch.cuda.synchronize(); ts = time.perf_counter()
+        out, fm, used, st = run(img, a.seed)
+        per[bot] = round((time.perf_counter() - ts) * 1000, 1)
+        stages.append(st); used_m[bot] = used
+        cv2.imwrite(f'{OUT}/{bot}.png', out)
+        d = np.abs(out.astype(np.int16) - img.astype(np.int16)).mean(2)
+        rec = {'in_mask': None, 'outside': round(float(d.mean()), 4), 'changed_px_outside': 0}
+        if fm is not None:
+            rec = {'in_mask': round(float(d[fm > 127].mean()), 3), 'in_mask_any': round(float(d[fm > 0].mean()), 3),
+                   'outside': round(float(d[fm == 0].mean()), 4), 'changed_px_outside': int((d[fm == 0] > 0).sum())}
+            ref = f'/b/eyemask2x/{bot}.png'
+            if os.path.exists(ref):
+                r = cv2.imread(ref, 0) > 127; u = fm > 127
+                rec['iou_vs_eyemask2x'] = round(float((r & u).sum() / max(1, (r | u).sum())), 3)
+        diffs[bot] = rec
+        print(bot, per[bot], 'ms', used, {k: round(v * 1000, 1) for k, v in st.items()}, rec, flush=True)
+    v = np.array(list(per.values()))
+    sk = ['det', 'mask', 'crop', 'diff', 'paste']
+    ok = [d for d in diffs.values() if d['in_mask'] is not None]
+    res = {'method': f'sd-turbo img2img fp16 {a.res}px eye-band crop, strength {a.strength}, {a.steps} step(s) '
+                     f'(num_inference_steps={n_inf}), guidance 0, mask={a.mask}, prompt: {PROMPT}',
+           'per_image_ms': per, 'p50_ms': round(float(np.percentile(v, 50)), 1), 'p95_ms': round(float(np.percentile(v, 95)), 1),
+           'cold_load_s': round(cold, 2), 'gpu': '3090 GPU3', 'vram_peak_mb': round(torch.cuda.max_memory_allocated() / 2**20),
+           'stage_ms_p50': {k: round(float(np.median([s[k] for s in stages if k in s])) * 1000, 1) for k in sk},
+           'stage_ms_p95': {k: round(float(np.percentile([s[k] for s in stages if k in s], 95)) * 1000, 1) for k in sk},
+           'mask_used': used_m,
+           'pixel_diff': {'mean_in_mask': round(float(np.mean([d['in_mask'] for d in ok])), 3),
+                          'mean_outside': round(float(np.mean([d['outside'] for d in ok])), 4),
+                          'changed_px_outside_total': int(sum(d['changed_px_outside'] for d in ok)),
+                          'mean_iou_vs_eyemask2x': round(float(np.mean([d['iou_vs_eyemask2x'] for d in ok if 'iou_vs_eyemask2x' in d])), 3),
+                          'per_image': diffs},
+           'notes': 'warm end-to-end per image = RetinaFace det (640px, GPU) + eyelid mask + crop/resize + diffusion (VAE enc + UNet + VAE dec) + '
+                    'paste; image read/write excluded. mask=mp: MediaPipe FaceLandmarker (CPU, XNNPACK) on a 256px face crop, lids polygon x1.3, '
+                    'Gaussian sigma 3 (same recipe as eyemask2x); falls back to kps ellipse if MediaPipe misses. mask=kps: two ellipses '
+                    '(0.30 x 0.13 IOD) at RetinaFace eye kps. Prompt embeds cached at load (text encoder freed). VAE = SD2.1 VAE '
+                    '(osd_models/sd21/vae). in_mask = mean |out-base| (0-255) where mask>127; outside = where mask==0. GPU 3 shared.'}
+    print(json.dumps({k: res[k] for k in ('p50_ms', 'p95_ms', 'cold_load_s', 'vram_peak_mb', 'stage_ms_p50')}),
+          json.dumps({k: v for k, v in res['pixel_diff'].items() if k != 'per_image'}))
+    os.makedirs('/b/lat', exist_ok=True)
+    json.dump(res, open(f'/b/lat/{a.variant}.json', 'w'), indent=1)
